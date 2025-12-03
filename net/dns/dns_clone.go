@@ -43,6 +43,12 @@ func (src *Config) Clone() *Config {
 			dst.Hosts[k] = append([]netip.Addr{}, src.Hosts[k]...)
 		}
 	}
+	if dst.WildcardHosts != nil {
+		dst.WildcardHosts = map[dnsname.FQDN][]netip.Addr{}
+		for k := range src.WildcardHosts {
+			dst.WildcardHosts[k] = append([]netip.Addr{}, src.WildcardHosts[k]...)
+		}
+	}
 	return dst
 }
 
@@ -52,6 +58,7 @@ var _ConfigCloneNeedsRegeneration = Config(struct {
 	Routes           map[dnsname.FQDN][]*dnstype.Resolver
 	SearchDomains    []dnsname.FQDN
 	Hosts            map[dnsname.FQDN][]netip.Addr
+	WildcardHosts    map[dnsname.FQDN][]netip.Addr
 	OnlyIPv6         bool
 }{})
 

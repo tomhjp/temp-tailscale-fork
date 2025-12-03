@@ -64,7 +64,8 @@ type packet struct {
 
 // Config is a resolver configuration.
 // Given a Config, queries are resolved in the following order:
-// If the query is an exact match for an entry in LocalHosts, return that.
+// If the query is an exact match for an entry in Hosts, return that.
+// Else if the query matches a wildcard in WildcardHosts, return that.
 // Else if the query suffix matches an entry in LocalDomains, return NXDOMAIN.
 // Else forward the query to the most specific matching entry in Routes.
 // Else return SERVFAIL.
@@ -74,8 +75,12 @@ type Config struct {
 	// Queries only match the most specific suffix.
 	// To register a "default route", add an entry for ".".
 	Routes map[dnsname.FQDN][]*dnstype.Resolver
-	// LocalHosts is a map of FQDNs to corresponding IPs.
+	// Hosts is a map of FQDNs to corresponding IPs.
 	Hosts map[dnsname.FQDN][]netip.Addr
+	// WildcardHosts maps parent domains to IPs for wildcard matching.
+	// The key is the parent domain (e.g., "example.com." for "*.example.com").
+	// Wildcards match a single DNS label only (RFC 4592).
+	WildcardHosts map[dnsname.FQDN][]netip.Addr
 	// LocalDomains is a list of DNS name suffixes that should not be
 	// routed to upstream resolvers.
 	LocalDomains []dnsname.FQDN
@@ -214,10 +219,11 @@ type Resolver struct {
 	closed chan struct{}
 
 	// mu guards the following fields from being updated while used.
-	mu           syncs.Mutex
-	localDomains []dnsname.FQDN
-	hostToIP     map[dnsname.FQDN][]netip.Addr
-	ipToHost     map[netip.Addr]dnsname.FQDN
+	mu               syncs.Mutex
+	localDomains     []dnsname.FQDN
+	hostToIP         map[dnsname.FQDN][]netip.Addr
+	wildcardHostToIP map[dnsname.FQDN][]netip.Addr
+	ipToHost         map[netip.Addr]dnsname.FQDN
 }
 
 type ForwardLinkSelector interface {
@@ -241,13 +247,14 @@ func New(logf logger.Logf, linkSel ForwardLinkSelector, dialer *tsdial.Dialer, h
 		logf("nil netMon")
 	}
 	r := &Resolver{
-		logf:     logger.WithPrefix(logf, "resolver: "),
-		netMon:   netMon,
-		closed:   make(chan struct{}),
-		hostToIP: map[dnsname.FQDN][]netip.Addr{},
-		ipToHost: map[netip.Addr]dnsname.FQDN{},
-		dialer:   dialer,
-		health:   health,
+		logf:             logger.WithPrefix(logf, "resolver: "),
+		netMon:           netMon,
+		closed:           make(chan struct{}),
+		hostToIP:         map[dnsname.FQDN][]netip.Addr{},
+		wildcardHostToIP: map[dnsname.FQDN][]netip.Addr{},
+		ipToHost:         map[netip.Addr]dnsname.FQDN{},
+		dialer:           dialer,
+		health:           health,
 	}
 	r.forwarder = newForwarder(r.logf, netMon, linkSel, dialer, health, knobs)
 	return r
@@ -277,6 +284,7 @@ func (r *Resolver) SetConfig(cfg Config) error {
 	defer r.mu.Unlock()
 	r.localDomains = cfg.LocalDomains
 	r.hostToIP = cfg.Hosts
+	r.wildcardHostToIP = cfg.WildcardHosts
 	r.ipToHost = reverse
 	return nil
 }
@@ -641,10 +649,24 @@ func (r *Resolver) resolveLocal(domain dnsname.FQDN, typ dns.Type) (netip.Addr, 
 
 	r.mu.Lock()
 	hosts := r.hostToIP
+	wildcardHosts := r.wildcardHostToIP
 	localDomains := r.localDomains
 	r.mu.Unlock()
 
 	addrs, found := hosts[domain]
+	if !found {
+		// Check ancestors for wildcard match. Walk up the domain hierarchy
+		// looking for a wildcard entry. Stop if we find an exact host match
+		// (closer match blocks wildcard).
+		for parent := domain.Parent(); parent != ""; parent = parent.Parent() {
+			if _, hasExact := hosts[parent]; hasExact {
+				break // exact match blocks wildcard
+			}
+			if addrs, found = wildcardHosts[parent]; found {
+				break
+			}
+		}
+	}
 	if !found {
 		for _, suffix := range localDomains {
 			if suffix.Contains(domain) {

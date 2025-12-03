@@ -48,6 +48,12 @@ type Config struct {
 	// it to resolve, you also need to add appropriate routes to
 	// Routes.
 	Hosts map[dnsname.FQDN][]netip.Addr
+	// WildcardHosts maps wildcard DNS patterns to their IPs.
+	// The key is the parent domain (e.g., "example.com." for "*.example.com").
+	// Wildcards match any descendant unless blocked by a closer exact match:
+	// "*.example.com" matches both "www.example.com" and "foo.www.example.com",
+	// but not if "www.example.com" exists in Hosts.
+	WildcardHosts map[dnsname.FQDN][]netip.Addr
 	// OnlyIPv6, if true, uses the IPv6 service IP (for MagicDNS)
 	// instead of the IPv4 version (100.100.100.100).
 	OnlyIPv6 bool

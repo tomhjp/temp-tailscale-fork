@@ -1803,6 +1803,12 @@ type DNSConfig struct {
 type DNSRecord struct {
 	// Name is the fully qualified domain name of
 	// the record to add. The trailing dot is optional.
+	//
+	// Wildcard records are supported using the "*." prefix.
+	// For example, "*.example.com" matches any subdomain like
+	// "www.example.com" or "foo.bar.example.com", unless blocked
+	// by a closer exact match (e.g., an exact record for "bar.example.com"
+	// would block "*.example.com" from matching "foo.bar.example.com").
 	Name string
 
 	// Type is the DNS record type.

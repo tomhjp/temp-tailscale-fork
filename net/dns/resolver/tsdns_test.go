@@ -429,6 +429,70 @@ func TestResolveLocal(t *testing.T) {
 	}
 }
 
+func TestResolveLocalWildcard(t *testing.T) {
+	r := newResolver(t)
+	defer r.Close()
+
+	wildcardIP := netip.MustParseAddr("5.6.7.8")
+	wildcardIPv6 := netip.MustParseAddr("2001:db8::1")
+
+	cfg := Config{
+		Hosts: map[dnsname.FQDN][]netip.Addr{
+			"test1.ipn.dev.":     {testipv4},
+			"exact.example.com.": {testipv4}, // exact match should take precedence
+			"mid.example.com.":   {testipv4}, // blocks wildcard for deeper names
+		},
+		WildcardHosts: map[dnsname.FQDN][]netip.Addr{
+			"example.com.": {wildcardIP, wildcardIPv6}, // *.example.com
+			"ipn.dev.":     {wildcardIP},               // *.ipn.dev
+		},
+		LocalDomains: []dnsname.FQDN{"ipn.dev.", "example.com."},
+	}
+	r.SetConfig(cfg)
+
+	tests := []struct {
+		name  string
+		qname dnsname.FQDN
+		qtype dns.Type
+		ip    netip.Addr
+		code  dns.RCode
+	}{
+		// Exact match takes precedence over wildcard
+		{"exact-match", "test1.ipn.dev.", dns.TypeA, testipv4, dns.RCodeSuccess},
+		{"exact-over-wildcard", "exact.example.com.", dns.TypeA, testipv4, dns.RCodeSuccess},
+
+		// Wildcard matches single level
+		{"wildcard-ipv4", "anything.example.com.", dns.TypeA, wildcardIP, dns.RCodeSuccess},
+		{"wildcard-ipv6", "anything.example.com.", dns.TypeAAAA, wildcardIPv6, dns.RCodeSuccess},
+		{"wildcard-other-domain", "foo.ipn.dev.", dns.TypeA, wildcardIP, dns.RCodeSuccess},
+
+		// Wildcard matches multi-level
+		{"multi-level", "sub.anything.example.com.", dns.TypeA, wildcardIP, dns.RCodeSuccess},
+		{"multi-level-deep", "a.b.c.example.com.", dns.TypeA, wildcardIP, dns.RCodeSuccess},
+
+		// Exact match at intermediate level blocks wildcard
+		{"blocked-by-exact", "sub.mid.example.com.", dns.TypeA, netip.Addr{}, dns.RCodeNameError},
+
+		// Parent domain itself doesn't match wildcard
+		{"parent-no-match", "example.com.", dns.TypeA, netip.Addr{}, dns.RCodeNameError},
+
+		// Foreign domain still refused
+		{"foreign", "google.com.", dns.TypeA, netip.Addr{}, dns.RCodeRefused},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ip, code := r.resolveLocal(tt.qname, tt.qtype)
+			if code != tt.code {
+				t.Errorf("code = %v; want %v", code, tt.code)
+			}
+			if ip != tt.ip {
+				t.Errorf("ip = %v; want %v", ip, tt.ip)
+			}
+		})
+	}
+}
+
 func TestResolveLocalReverse(t *testing.T) {
 	r := newResolver(t)
 	defer r.Close()

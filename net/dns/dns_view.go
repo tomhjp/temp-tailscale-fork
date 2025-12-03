@@ -123,6 +123,15 @@ func (v ConfigView) Hosts() views.MapSlice[dnsname.FQDN, netip.Addr] {
 	return views.MapSliceOf(v.ж.Hosts)
 }
 
+// WildcardHosts maps wildcard DNS patterns to their IPs.
+// The key is the parent domain (e.g., "example.com." for "*.example.com").
+// Wildcards match any descendant unless blocked by a closer exact match:
+// "*.example.com" matches both "www.example.com" and "foo.www.example.com",
+// but not if "www.example.com" exists in Hosts.
+func (v ConfigView) WildcardHosts() views.MapSlice[dnsname.FQDN, netip.Addr] {
+	return views.MapSliceOf(v.ж.WildcardHosts)
+}
+
 // OnlyIPv6, if true, uses the IPv6 service IP (for MagicDNS)
 // instead of the IPv4 version (100.100.100.100).
 func (v ConfigView) OnlyIPv6() bool           { return v.ж.OnlyIPv6 }
@@ -134,5 +143,6 @@ var _ConfigViewNeedsRegeneration = Config(struct {
 	Routes           map[dnsname.FQDN][]*dnstype.Resolver
 	SearchDomains    []dnsname.FQDN
 	Hosts            map[dnsname.FQDN][]netip.Addr
+	WildcardHosts    map[dnsname.FQDN][]netip.Addr
 	OnlyIPv6         bool
 }{})

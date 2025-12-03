@@ -8,6 +8,7 @@ import (
 	"context"
 	"net/netip"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -694,8 +695,9 @@ func dnsConfigForNetmap(nm *netmap.NetworkMap, peers map[tailcfg.NodeID]tailcfg.
 	}
 
 	dcfg := &dns.Config{
-		Routes: map[dnsname.FQDN][]*dnstype.Resolver{},
-		Hosts:  map[dnsname.FQDN][]netip.Addr{},
+		Routes:        map[dnsname.FQDN][]*dnstype.Resolver{},
+		Hosts:         map[dnsname.FQDN][]netip.Addr{},
+		WildcardHosts: map[dnsname.FQDN][]netip.Addr{},
 	}
 
 	// selfV6Only is whether we only have IPv6 addresses ourselves.
@@ -769,7 +771,14 @@ func dnsConfigForNetmap(nm *netmap.NetworkMap, peers map[tailcfg.NodeID]tailcfg.
 		if err != nil {
 			continue
 		}
-		dcfg.Hosts[fqdn] = append(dcfg.Hosts[fqdn], ip)
+		// Detect wildcard records: "*.example.com" -> store parent "example.com" in WildcardHosts
+		if strings.HasPrefix(rec.Name, "*.") {
+			if parent := fqdn.Parent(); parent != "" {
+				dcfg.WildcardHosts[parent] = append(dcfg.WildcardHosts[parent], ip)
+			}
+		} else {
+			dcfg.Hosts[fqdn] = append(dcfg.Hosts[fqdn], ip)
+		}
 	}
 
 	if !prefs.CorpDNS() {

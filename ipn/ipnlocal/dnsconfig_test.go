@@ -63,8 +63,9 @@ func TestDNSConfigForNetmap(t *testing.T) {
 			nm:    &netmap.NetworkMap{},
 			prefs: &ipn.Prefs{},
 			want: &dns.Config{
-				Routes: map[dnsname.FQDN][]*dnstype.Resolver{},
-				Hosts:  map[dnsname.FQDN][]netip.Addr{},
+				Routes:        map[dnsname.FQDN][]*dnstype.Resolver{},
+				Hosts:         map[dnsname.FQDN][]netip.Addr{},
+				WildcardHosts: map[dnsname.FQDN][]netip.Addr{},
 			},
 		},
 		{
@@ -101,6 +102,7 @@ func TestDNSConfigForNetmap(t *testing.T) {
 					"peera.net.":   ips("100.102.0.1", "100.102.0.2"),
 					"v6-only.net.": ips("fe75::3"),
 				},
+				WildcardHosts: map[dnsname.FQDN][]netip.Addr{},
 			},
 		},
 		{
@@ -141,6 +143,7 @@ func TestDNSConfigForNetmap(t *testing.T) {
 					"peera.net.":   ips("fe75::1001"),
 					"v6-only.net.": ips("fe75::3"),
 				},
+				WildcardHosts: map[dnsname.FQDN][]netip.Addr{},
 			},
 		},
 		{
@@ -166,6 +169,34 @@ func TestDNSConfigForNetmap(t *testing.T) {
 					"foo.com.":    ips("1.2.3.4"),
 					"bar.com.":    ips("1::6"),
 				},
+				WildcardHosts: map[dnsname.FQDN][]netip.Addr{},
+			},
+		},
+		{
+			name: "wildcard_extra_records",
+			nm: &netmap.NetworkMap{
+				SelfNode: (&tailcfg.Node{
+					Name:      "myname.net.",
+					Addresses: ipps("100.101.101.101"),
+				}).View(),
+				DNS: tailcfg.DNSConfig{
+					ExtraRecords: []tailcfg.DNSRecord{
+						{Name: "*.example.com", Value: "5.6.7.8"},
+						{Name: "*.example.com", Value: "2001:db8::1"},
+						{Name: "exact.example.com", Value: "9.10.11.12"},
+					},
+				},
+			},
+			prefs: &ipn.Prefs{},
+			want: &dns.Config{
+				Routes: map[dnsname.FQDN][]*dnstype.Resolver{},
+				Hosts: map[dnsname.FQDN][]netip.Addr{
+					"myname.net.":        ips("100.101.101.101"),
+					"exact.example.com.": ips("9.10.11.12"),
+				},
+				WildcardHosts: map[dnsname.FQDN][]netip.Addr{
+					"example.com.": ips("5.6.7.8", "2001:db8::1"),
+				},
 			},
 		},
 		{
@@ -183,7 +214,8 @@ func TestDNSConfigForNetmap(t *testing.T) {
 				CorpDNS: true,
 			},
 			want: &dns.Config{
-				Hosts: map[dnsname.FQDN][]netip.Addr{},
+				Hosts:         map[dnsname.FQDN][]netip.Addr{},
+				WildcardHosts: map[dnsname.FQDN][]netip.Addr{},
 				Routes: map[dnsname.FQDN][]*dnstype.Resolver{
 					"0.e.1.a.c.5.1.1.a.7.d.f.ip6.arpa.": nil,
 					"100.100.in-addr.arpa.":             nil,
@@ -283,7 +315,8 @@ func TestDNSConfigForNetmap(t *testing.T) {
 				CorpDNS: true,
 			},
 			want: &dns.Config{
-				Hosts: map[dnsname.FQDN][]netip.Addr{},
+				Hosts:         map[dnsname.FQDN][]netip.Addr{},
+				WildcardHosts: map[dnsname.FQDN][]netip.Addr{},
 				DefaultResolvers: []*dnstype.Resolver{
 					{Addr: "8.8.8.8"},
 				},
@@ -306,8 +339,9 @@ func TestDNSConfigForNetmap(t *testing.T) {
 				ExitNodeID: "some-id",
 			},
 			want: &dns.Config{
-				Hosts:  map[dnsname.FQDN][]netip.Addr{},
-				Routes: map[dnsname.FQDN][]*dnstype.Resolver{},
+				Hosts:         map[dnsname.FQDN][]netip.Addr{},
+				WildcardHosts: map[dnsname.FQDN][]netip.Addr{},
+				Routes:        map[dnsname.FQDN][]*dnstype.Resolver{},
 				DefaultResolvers: []*dnstype.Resolver{
 					{Addr: "8.8.4.4"},
 				},
@@ -326,8 +360,9 @@ func TestDNSConfigForNetmap(t *testing.T) {
 				CorpDNS: true,
 			},
 			want: &dns.Config{
-				Hosts:  map[dnsname.FQDN][]netip.Addr{},
-				Routes: map[dnsname.FQDN][]*dnstype.Resolver{},
+				Hosts:         map[dnsname.FQDN][]netip.Addr{},
+				WildcardHosts: map[dnsname.FQDN][]netip.Addr{},
+				Routes:        map[dnsname.FQDN][]*dnstype.Resolver{},
 			},
 		},
 		{

@@ -123,6 +123,35 @@ func TestFQDNContains(t *testing.T) {
 	}
 }
 
+func TestFQDNParent(t *testing.T) {
+	tests := []struct {
+		in         string
+		wantParent string
+	}{
+		{"www.example.com", "example.com."},
+		{"foo.bar.baz.com", "bar.baz.com."},
+		{"example.com", "com."},
+		{"com", ""},                       // single label, parent would be root
+		{".", ""},                         // root has no parent
+		{"", ""},                          // empty -> root, no parent
+		{"*.example.com", "example.com."}, // wildcard label
+	}
+
+	for _, test := range tests {
+		t.Run(test.in, func(t *testing.T) {
+			fqdn, err := ToFQDN(test.in)
+			if err != nil {
+				t.Fatalf("ToFQDN(%q): %v", test.in, err)
+			}
+
+			gotParent := fqdn.Parent()
+			if string(gotParent) != test.wantParent {
+				t.Errorf("FQDN(%q).Parent() = %q, want %q", fqdn, gotParent, test.wantParent)
+			}
+		})
+	}
+}
+
 func TestSanitizeLabel(t *testing.T) {
 	tests := []struct {
 		name string
