@@ -63,8 +63,9 @@ func TestDNSConfigForNetmap(t *testing.T) {
 			nm:    &netmap.NetworkMap{},
 			prefs: &ipn.Prefs{},
 			want: &dns.Config{
-				Routes: map[dnsname.FQDN][]*dnstype.Resolver{},
-				Hosts:  map[dnsname.FQDN][]netip.Addr{},
+				Routes:     map[dnsname.FQDN][]*dnstype.Resolver{},
+				Hosts:      map[dnsname.FQDN][]netip.Addr{},
+				CnameHosts: map[dnsname.FQDN]dnsname.FQDN{},
 			},
 		},
 		{
@@ -101,6 +102,7 @@ func TestDNSConfigForNetmap(t *testing.T) {
 					"peera.net.":   ips("100.102.0.1", "100.102.0.2"),
 					"v6-only.net.": ips("fe75::3"),
 				},
+				CnameHosts: map[dnsname.FQDN]dnsname.FQDN{},
 			},
 		},
 		{
@@ -141,6 +143,7 @@ func TestDNSConfigForNetmap(t *testing.T) {
 					"peera.net.":   ips("fe75::1001"),
 					"v6-only.net.": ips("fe75::3"),
 				},
+				CnameHosts: map[dnsname.FQDN]dnsname.FQDN{},
 			},
 		},
 		{
@@ -165,6 +168,69 @@ func TestDNSConfigForNetmap(t *testing.T) {
 					"myname.net.": ips("100.101.101.101"),
 					"foo.com.":    ips("1.2.3.4"),
 					"bar.com.":    ips("1::6"),
+				},
+				CnameHosts: map[dnsname.FQDN]dnsname.FQDN{},
+			},
+		},
+		{
+			name: "cname_extra_records",
+			nm: &netmap.NetworkMap{
+				SelfNode: (&tailcfg.Node{
+					Name:      "myname.net.",
+					Addresses: ipps("100.101.101.101"),
+				}).View(),
+				DNS: tailcfg.DNSConfig{
+					ExtraRecords: []tailcfg.DNSRecord{
+						// A record for the CNAME target (must exist in Hosts)
+						{Name: "server.tail1234.ts.net", Value: "5.6.7.8"},
+						// Exact CNAME
+						{Name: "alias.example.com", Type: "CNAME", Value: "server.tail1234.ts.net"},
+						// Wildcard CNAME
+						{Name: "*.myapp.com", Type: "CNAME", Value: "server.tail1234.ts.net"},
+						// CNAME with target not in Hosts should be ignored
+						{Name: "bad.example.com", Type: "CNAME", Value: "external.example.com"},
+					},
+				},
+			},
+			prefs: &ipn.Prefs{},
+			want: &dns.Config{
+				Routes: map[dnsname.FQDN][]*dnstype.Resolver{},
+				Hosts: map[dnsname.FQDN][]netip.Addr{
+					"myname.net.":             ips("100.101.101.101"),
+					"server.tail1234.ts.net.": ips("5.6.7.8"),
+				},
+				CnameHosts: map[dnsname.FQDN]dnsname.FQDN{
+					"alias.example.com.": "server.tail1234.ts.net.",
+					"*.myapp.com.":       "server.tail1234.ts.net.",
+				},
+			},
+		},
+		{
+			name: "cname_chain",
+			nm: &netmap.NetworkMap{
+				SelfNode: (&tailcfg.Node{
+					Name:      "myname.net.",
+					Addresses: ipps("100.101.101.101"),
+				}).View(),
+				DNS: tailcfg.DNSConfig{
+					ExtraRecords: []tailcfg.DNSRecord{
+						// Order intentionally mixed to test order-independence
+						{Name: "alias.example.com", Type: "CNAME", Value: "intermediate.tail1234.ts.net"},
+						{Name: "intermediate.tail1234.ts.net", Type: "CNAME", Value: "server.tail1234.ts.net"},
+						{Name: "server.tail1234.ts.net", Value: "5.6.7.8"},
+					},
+				},
+			},
+			prefs: &ipn.Prefs{},
+			want: &dns.Config{
+				Routes: map[dnsname.FQDN][]*dnstype.Resolver{},
+				Hosts: map[dnsname.FQDN][]netip.Addr{
+					"myname.net.":             ips("100.101.101.101"),
+					"server.tail1234.ts.net.": ips("5.6.7.8"),
+				},
+				CnameHosts: map[dnsname.FQDN]dnsname.FQDN{
+					"alias.example.com.":            "intermediate.tail1234.ts.net.",
+					"intermediate.tail1234.ts.net.": "server.tail1234.ts.net.",
 				},
 			},
 		},
@@ -256,6 +322,7 @@ func TestDNSConfigForNetmap(t *testing.T) {
 					"foo.com.",
 					"bar.com.",
 				},
+				CnameHosts: map[dnsname.FQDN]dnsname.FQDN{},
 			},
 		},
 		{
@@ -290,6 +357,7 @@ func TestDNSConfigForNetmap(t *testing.T) {
 				Routes: map[dnsname.FQDN][]*dnstype.Resolver{
 					"foo.com.": {{Addr: "1.2.3.4"}},
 				},
+				CnameHosts: map[dnsname.FQDN]dnsname.FQDN{},
 			},
 		},
 		{
@@ -311,6 +379,7 @@ func TestDNSConfigForNetmap(t *testing.T) {
 				DefaultResolvers: []*dnstype.Resolver{
 					{Addr: "8.8.4.4"},
 				},
+				CnameHosts: map[dnsname.FQDN]dnsname.FQDN{},
 			},
 		},
 		{
@@ -326,8 +395,9 @@ func TestDNSConfigForNetmap(t *testing.T) {
 				CorpDNS: true,
 			},
 			want: &dns.Config{
-				Hosts:  map[dnsname.FQDN][]netip.Addr{},
-				Routes: map[dnsname.FQDN][]*dnstype.Resolver{},
+				Hosts:      map[dnsname.FQDN][]netip.Addr{},
+				Routes:     map[dnsname.FQDN][]*dnstype.Resolver{},
+				CnameHosts: map[dnsname.FQDN]dnsname.FQDN{},
 			},
 		},
 		{

@@ -64,7 +64,8 @@ type packet struct {
 
 // Config is a resolver configuration.
 // Given a Config, queries are resolved in the following order:
-// If the query is an exact match for an entry in LocalHosts, return that.
+// If the query is an exact match for an entry in Hosts, return that.
+// Else if the query matches a CNAME (exact or wildcard), resolve the target.
 // Else if the query suffix matches an entry in LocalDomains, return NXDOMAIN.
 // Else forward the query to the most specific matching entry in Routes.
 // Else return SERVFAIL.
@@ -74,8 +75,12 @@ type Config struct {
 	// Queries only match the most specific suffix.
 	// To register a "default route", add an entry for ".".
 	Routes map[dnsname.FQDN][]*dnstype.Resolver
-	// LocalHosts is a map of FQDNs to corresponding IPs.
+	// Hosts is a map of FQDNs to corresponding IPs.
 	Hosts map[dnsname.FQDN][]netip.Addr
+	// CnameHosts maps FQDNs to their CNAME targets.
+	// Targets must be resolvable via Hosts (ts.net domains).
+	// Wildcard CNAMEs are supported using "*.domain." as the key.
+	CnameHosts map[dnsname.FQDN]dnsname.FQDN
 	// LocalDomains is a list of DNS name suffixes that should not be
 	// routed to upstream resolvers.
 	LocalDomains []dnsname.FQDN
@@ -214,10 +219,12 @@ type Resolver struct {
 	closed chan struct{}
 
 	// mu guards the following fields from being updated while used.
-	mu           syncs.Mutex
-	localDomains []dnsname.FQDN
-	hostToIP     map[dnsname.FQDN][]netip.Addr
-	ipToHost     map[netip.Addr]dnsname.FQDN
+	mu                    syncs.Mutex
+	localDomains          []dnsname.FQDN
+	hostToIP              map[dnsname.FQDN][]netip.Addr
+	ipToHost              map[netip.Addr]dnsname.FQDN
+	cnameToTarget         map[dnsname.FQDN]dnsname.FQDN
+	wildcardCnameToTarget map[dnsname.FQDN]dnsname.FQDN
 }
 
 type ForwardLinkSelector interface {
@@ -241,13 +248,15 @@ func New(logf logger.Logf, linkSel ForwardLinkSelector, dialer *tsdial.Dialer, h
 		logf("nil netMon")
 	}
 	r := &Resolver{
-		logf:     logger.WithPrefix(logf, "resolver: "),
-		netMon:   netMon,
-		closed:   make(chan struct{}),
-		hostToIP: map[dnsname.FQDN][]netip.Addr{},
-		ipToHost: map[netip.Addr]dnsname.FQDN{},
-		dialer:   dialer,
-		health:   health,
+		logf:                  logger.WithPrefix(logf, "resolver: "),
+		netMon:                netMon,
+		closed:                make(chan struct{}),
+		hostToIP:              map[dnsname.FQDN][]netip.Addr{},
+		ipToHost:              map[netip.Addr]dnsname.FQDN{},
+		cnameToTarget:         map[dnsname.FQDN]dnsname.FQDN{},
+		wildcardCnameToTarget: map[dnsname.FQDN]dnsname.FQDN{},
+		dialer:                dialer,
+		health:                health,
 	}
 	r.forwarder = newForwarder(r.logf, netMon, linkSel, dialer, health, knobs)
 	return r
@@ -273,11 +282,25 @@ func (r *Resolver) SetConfig(cfg Config) error {
 
 	r.forwarder.setRoutes(cfg.Routes)
 
+	// Split CnameHosts into exact and wildcard maps.
+	cnameToTarget := make(map[dnsname.FQDN]dnsname.FQDN)
+	wildcardCnameToTarget := make(map[dnsname.FQDN]dnsname.FQDN)
+	for fqdn, target := range cfg.CnameHosts {
+		if strings.HasPrefix(string(fqdn), "*.") {
+			parent := dnsname.FQDN(string(fqdn)[2:])
+			wildcardCnameToTarget[parent] = target
+		} else {
+			cnameToTarget[fqdn] = target
+		}
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.localDomains = cfg.LocalDomains
 	r.hostToIP = cfg.Hosts
 	r.ipToHost = reverse
+	r.cnameToTarget = cnameToTarget
+	r.wildcardCnameToTarget = wildcardCnameToTarget
 	return nil
 }
 
@@ -528,7 +551,7 @@ func handleExitNodeDNSQueryWithNetPkg(ctx context.Context, logf logger.Logf, res
 		if err != nil {
 			return handleError(err)
 		}
-		resp.CNAME = cname
+		resp.CNAMEs = []string{cname}
 	case dns.TypeSRV:
 		if debugExitNodeDNSNetPkg() {
 			logf("resolving SRV %q", name)
@@ -714,6 +737,27 @@ func (r *Resolver) resolveLocal(domain dnsname.FQDN, typ dns.Type) (netip.Addr, 
 	}
 }
 
+// lookupCNAME checks if domain has a CNAME record (exact or wildcard match).
+// Returns the CNAME target and true if found, otherwise empty string and false.
+func (r *Resolver) lookupCNAME(domain dnsname.FQDN) (dnsname.FQDN, bool) {
+	r.mu.Lock()
+	cnameHosts := r.cnameToTarget
+	wildcardCnames := r.wildcardCnameToTarget
+	r.mu.Unlock()
+
+	if target, ok := cnameHosts[domain]; ok {
+		return target, true
+	}
+
+	for parent := domain.Parent(); parent != ""; parent = parent.Parent() {
+		if target, ok := wildcardCnames[parent]; ok {
+			return target, true
+		}
+	}
+
+	return "", false
+}
+
 // resolveViaDomain synthesizes an IP address for quad-A DNS requests of the form
 // `<IPv4-address-with-hypens-instead-of-dots>-via-<siteid>[.*]`. Two prior formats that
 // didn't pan out (due to a Chrome issue and DNS search ndots issues) were
@@ -875,8 +919,10 @@ type response struct {
 	// Each one is its own RR with one string.
 	TXT []string
 
-	// CNAME is the response to a CNAME query.
-	CNAME string
+	// CNAMEs is the CNAME chain for the response.
+	// Each entry is a target; the "from" is implied (query name, then each previous target).
+	// For a chain: query → target1 → target2 → IP, CNAMEs = [target1, target2]
+	CNAMEs []string
 
 	// SRVs are the responses to a SRV query.
 	SRVs []*net.SRV
@@ -1108,7 +1154,22 @@ func marshalResponse(resp *response) ([]byte, error) {
 
 	switch resp.Question.Type {
 	case dns.TypeA, dns.TypeAAAA, dns.TypeALL:
-		if err := marshalIP(resp.Question.Name, resp.IP, &builder); err != nil {
+		// Output CNAME chain first (if any), then the resolved IP
+		ipName := resp.Question.Name
+		if len(resp.CNAMEs) > 0 {
+			fromName := resp.Question.Name
+			for _, target := range resp.CNAMEs {
+				if err := marshalCNAME(fromName, target, &builder); err != nil {
+					return nil, err
+				}
+				fromName, err = dns.NewName(target)
+				if err != nil {
+					return nil, err
+				}
+			}
+			ipName = fromName
+		}
+		if err := marshalIP(ipName, resp.IP, &builder); err != nil {
 			return nil, err
 		}
 		for _, ip := range resp.IPs {
@@ -1121,7 +1182,9 @@ func marshalResponse(resp *response) ([]byte, error) {
 	case dns.TypeTXT:
 		err = marshalTXT(resp.Question.Name, resp.TXT, &builder)
 	case dns.TypeCNAME:
-		err = marshalCNAME(resp.Question.Name, resp.CNAME, &builder)
+		if len(resp.CNAMEs) > 0 {
+			err = marshalCNAME(resp.Question.Name, resp.CNAMEs[0], &builder)
+		}
 	case dns.TypeSRV:
 		err = marshalSRV(resp.Question.Name, resp.SRVs, &builder)
 	case dns.TypeNS:
@@ -1307,15 +1370,37 @@ func (r *Resolver) respond(query []byte) ([]byte, error) {
 		return r.respondReverse(query, name, parser.response())
 	}
 
-	ip, rcode := r.resolveLocal(name, parser.Question.Type)
-	if rcode == dns.RCodeRefused {
-		return nil, errNotOurName // sentinel error return value: it requests forwarding
+	resp := parser.response()
+
+	var cnameChain []string
+	current := name
+	for range 8 { // max chain depth
+		ip, rcode := r.resolveLocal(current, parser.Question.Type)
+		if rcode == dns.RCodeSuccess {
+			resp.Header.RCode = rcode
+			resp.IP = ip
+			resp.CNAMEs = cnameChain
+			metricDNSMagicDNSSuccessName.Add(1)
+			return marshalResponse(resp)
+		}
+
+		target, ok := r.lookupCNAME(current)
+		if !ok {
+			if rcode == dns.RCodeRefused {
+				return nil, errNotOurName
+			}
+			resp.Header.RCode = rcode
+			resp.CNAMEs = cnameChain
+			metricDNSMagicDNSSuccessName.Add(1)
+			return marshalResponse(resp)
+		}
+
+		cnameChain = append(cnameChain, target.WithTrailingDot())
+		current = target
 	}
 
-	resp := parser.response()
-	resp.Header.RCode = rcode
-	resp.IP = ip
-	metricDNSMagicDNSSuccessName.Add(1)
+	// Max depth exceeded - return SERVFAIL
+	resp.Header.RCode = dns.RCodeServerFailure
 	return marshalResponse(resp)
 }
 

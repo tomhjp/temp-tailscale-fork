@@ -694,8 +694,9 @@ func dnsConfigForNetmap(nm *netmap.NetworkMap, peers map[tailcfg.NodeID]tailcfg.
 	}
 
 	dcfg := &dns.Config{
-		Routes: map[dnsname.FQDN][]*dnstype.Resolver{},
-		Hosts:  map[dnsname.FQDN][]netip.Addr{},
+		Routes:     map[dnsname.FQDN][]*dnstype.Resolver{},
+		Hosts:      map[dnsname.FQDN][]netip.Addr{},
+		CnameHosts: map[dnsname.FQDN]dnsname.FQDN{},
 	}
 
 	// selfV6Only is whether we only have IPv6 addresses ourselves.
@@ -752,24 +753,64 @@ func dnsConfigForNetmap(nm *netmap.NetworkMap, peers map[tailcfg.NodeID]tailcfg.
 	for _, peer := range peers {
 		set(peer.Name(), peer.Addresses())
 	}
+	// Put A/AAAA records on Hosts
 	for _, rec := range nm.DNS.ExtraRecords {
-		switch rec.Type {
-		case "", "A", "AAAA":
+		if rec.Type == "A" || rec.Type == "AAAA" || rec.Type == "" {
 			// Treat these all the same for now: infer from the value
-		default:
-			// TODO: more
+			ip, err := netip.ParseAddr(rec.Value)
+			if err != nil {
+				// Ignore.
+				continue
+			}
+			fqdn, err := dnsname.ToFQDN(rec.Name)
+			if err != nil {
+				continue
+			}
+			dcfg.Hosts[fqdn] = append(dcfg.Hosts[fqdn], ip)
+		}
+	}
+
+	// Collect all CNAMEs into a temporary map
+	tempCnames := make(map[dnsname.FQDN]dnsname.FQDN)
+	for _, rec := range nm.DNS.ExtraRecords {
+		if rec.Type != "CNAME" {
 			continue
 		}
-		ip, err := netip.ParseAddr(rec.Value)
+		target, err := dnsname.ToFQDN(rec.Value)
 		if err != nil {
-			// Ignore.
 			continue
 		}
 		fqdn, err := dnsname.ToFQDN(rec.Name)
 		if err != nil {
 			continue
 		}
-		dcfg.Hosts[fqdn] = append(dcfg.Hosts[fqdn], ip)
+		tempCnames[fqdn] = target
+	}
+
+	// Validate CNAME chains resolve to Hosts
+	resolvesToHost := func(target dnsname.FQDN) bool {
+		seen := make(map[dnsname.FQDN]bool)
+		current := target
+		for range 8 { // max chain depth
+			if _, ok := dcfg.Hosts[current]; ok {
+				return true
+			}
+			if seen[current] {
+				return false // cycle detected
+			}
+			seen[current] = true
+			next, ok := tempCnames[current]
+			if !ok {
+				return false // chain broken
+			}
+			current = next
+		}
+		return false // max depth exceeded
+	}
+	for fqdn, target := range tempCnames {
+		if resolvesToHost(target) {
+			dcfg.CnameHosts[fqdn] = target
+		}
 	}
 
 	if !prefs.CorpDNS() {

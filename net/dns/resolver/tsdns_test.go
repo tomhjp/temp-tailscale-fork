@@ -429,6 +429,60 @@ func TestResolveLocal(t *testing.T) {
 	}
 }
 
+func TestLookupCNAME(t *testing.T) {
+	r := newResolver(t)
+	defer r.Close()
+
+	cfg := Config{
+		Hosts: map[dnsname.FQDN][]netip.Addr{
+			"test1.ipn.dev.":          {testipv4},
+			"server.tail1234.ts.net.": {netip.MustParseAddr("5.6.7.8")},
+		},
+		CnameHosts: map[dnsname.FQDN]dnsname.FQDN{
+			"alias.example.com.": "server.tail1234.ts.net.",
+			"*.myapp.com.":       "server.tail1234.ts.net.",
+		},
+		LocalDomains: []dnsname.FQDN{"ipn.dev.", "example.com.", "myapp.com."},
+	}
+	r.SetConfig(cfg)
+
+	tests := []struct {
+		name       string
+		qname      dnsname.FQDN
+		wantTarget dnsname.FQDN
+		wantOK     bool
+	}{
+		// Direct host - no CNAME
+		{"direct-host", "test1.ipn.dev.", "", false},
+
+		// Exact CNAME match
+		{"exact-cname", "alias.example.com.", "server.tail1234.ts.net.", true},
+
+		// Wildcard CNAME match
+		{"wildcard-single", "www.myapp.com.", "server.tail1234.ts.net.", true},
+		{"wildcard-deep", "foo.bar.myapp.com.", "server.tail1234.ts.net.", true},
+
+		// Parent domain itself doesn't match wildcard
+		{"parent-no-match", "myapp.com.", "", false},
+
+		// Non-existent
+		{"nxdomain", "unknown.example.com.", "", false},
+		{"foreign", "google.com.", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			target, ok := r.lookupCNAME(tt.qname)
+			if ok != tt.wantOK {
+				t.Errorf("ok = %v; want %v", ok, tt.wantOK)
+			}
+			if target != tt.wantTarget {
+				t.Errorf("target = %v; want %v", target, tt.wantTarget)
+			}
+		})
+	}
+}
+
 func TestResolveLocalReverse(t *testing.T) {
 	r := newResolver(t)
 	defer r.Close()
