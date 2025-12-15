@@ -14,5 +14,15 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
     - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+    # - name: Warm up pwsh? Surely this isn't it.
+    #   if: runner.os == 'Windows'
+    #   run: echo "Warming up pwsh on Windows"
+    # - name: Wow so warm
+    #   if: runner.os == 'Windows'
+    #   run: echo "pwsh super warm now"
     - name: Version
+      shell: bash
+      run: ./tool/cigocacher --version
+    - name: Check cached
+      shell: bash
       run: ./tool/cigocacher --version
